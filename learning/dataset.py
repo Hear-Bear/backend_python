@@ -1,13 +1,23 @@
 import os
+import random
 
 import numpy as np
 import pandas as pd
 import torch
+from audiomentations import (
+    Compose,
+    AddGaussianNoise,
+    TimeStretch,
+    PitchShift,
+    Shift,
+    Gain
+)
 from datasets import load_dataset, Audio
 from transformers import AutoFeatureExtractor
-import torchaudio
-import torchaudio.sox_effects as sox_effects
-import random
+
+# 랜덤 시드 고정
+random.seed(442)
+np.random.seed(442)
 
 # 데이터셋에서 삭제할 (필요 없는)columns
 remove_columns = ['filename', 'esc10', 'audio']
@@ -19,8 +29,6 @@ esc50_dataset = load_dataset('ashraq/esc50')
 
 # 특징 추출기
 feature_extractor = AutoFeatureExtractor.from_pretrained(model_name)
-
-random.seed(442)
 
 
 def split_by_fold(dataset_split, test_fold=1):
@@ -47,7 +55,7 @@ def preprocess_function(data, apply_augmentation=False):
 
     # 학습 시 증강 적용 여부
     if apply_augmentation:
-        waveform, sr = advanced_augment_audio_torchaudio(waveform, sr)
+        waveform, sr = advanced_augment_audio_moderate(waveform, sr)
         # 증강 후 waveform을 numpy 배열로 변환 (특징 추출기가 numpy 입력을 필요로 할 경우)
         raw = waveform.squeeze(0).numpy()
     else:
@@ -59,43 +67,52 @@ def preprocess_function(data, apply_augmentation=False):
     return inputs
 
 
-def advanced_augment_audio_torchaudio(waveform, sample_rate):
+def get_moderate_augmentation_pipeline(sample_rate):
+    # # RoomSimulator 효과는 IR(Impulse Response) 파일이 필요합니다.
+    # # 실제 환경의 방음 특성을 반영한 IR 파일을 사용하세요.
+    # ir_path = "your_ir_file.wav"  # IR 파일 경로를 지정합니다.
+    #
+    # # Windows 환경에서 RoomSimulator가 동작하지 않을 경우 None으로 처리합니다.
+    # room_simulator = RoomSimulator(ir_path=ir_path, p=0.3) if platform.system() != "Windows" else None
+
+    # 여러 효과들을 Compose로 묶어줍니다.
+    # 각 트랜스폼은 실제 환경에서 너무 극단적이지 않은 수준으로 적용합니다.
+    transforms = [
+        # 배경 잡음을 약하게 추가 (실제 녹음된 환경의 미세한 잡음 모방)
+        AddGaussianNoise(min_amplitude=0.001, max_amplitude=0.005, p=0.5),
+        # 약간의 시간 변형 (너무 심하게 적용하면 오디오 특징이 깨질 수 있으므로 미세하게)
+        TimeStretch(min_rate=0.95, max_rate=1.05, p=0.5),
+        # 피치를 약간 변화시켜, 자연스러운 음높이 차이 모방 (±1 반음 정도)
+        PitchShift(min_semitones=-1, max_semitones=1, p=0.5),
+        # 오디오 신호의 시작이나 끝을 약간 이동 (전체 길이의 5~10% 정도)
+        Shift(min_shift=-0.1, max_shift=0.1, p=0.5),
+        # 실제 방의 잔향 효과를 반영 (IR 파일이 있다면 자연스러운 리버브 효과 적용)
+        # room_simulator,
+        # 볼륨을 약간 조절하여 녹음 조건의 차이를 반영
+        Gain(min_gain_db=-2.0, max_gain_db=2.0, p=0.5),
+    ]
+    # None인 효과는 필터링합니다.
+    transforms = [t for t in transforms if t is not None]
+    return Compose(transforms, p=1.0)
+
+
+def advanced_augment_audio_moderate(waveform, sample_rate):
     """
-    torchaudio의 sox_effects와 직접 잡음 추가, reverb, compand, overdrive 등을 조합하여
-    고급 증강을 적용하는 함수입니다.
-    waveform: torch.Tensor, shape = (channels, samples)
-    sample_rate: 정수형
+    입력된 waveform (torch.Tensor, shape: [1, samples])에 대해
+    실제 환경을 적당히 모방하는 증강을 적용합니다.
     """
+    # waveform을 numpy array (모노 채널)로 변환합니다.
+    np_waveform = waveform.squeeze(0).numpy()
 
-    # 1. 배경 잡음 추가 (예: 신호에 소량의 잡음을 더함)
-    if random.random() < 0.5:
-        noise = torch.randn_like(waveform) * 0.005  # 잡음 세기는 데이터에 따라 조절
-        waveform = waveform + noise
+    # 증강 파이프라인을 얻습니다.
+    augmentation_pipeline = get_moderate_augmentation_pipeline(sample_rate)
 
-    effects = []  # sox 효과 체인을 저장할 리스트
+    # 증강 효과 적용: np_waveform는 1차원 numpy array라고 가정합니다.
+    augmented_np_waveform = augmentation_pipeline(np_waveform, sample_rate=sample_rate)
 
-    # 2. 룸 리버브 효과 적용
-    if random.random() < 0.5:
-        # reverb 효과: 파라미터는 [reverberance, damping, room_scale, stereo_depth, pre_delay, wet_gain]
-        # 여기서는 임의의 값을 넣어 변형을 주도록 함 (필요시 세부 조절 가능)
-        effects.append(["reverb", "50", "50", "100", "100", "0", "0"])
-
-    # 3. 코덱 시뮬레이션: compand 효과 적용 (압축 후 확장)
-    if random.random() < 0.5:
-        # compand 파라미터 예시: attack, decay, transfer function 등 여러 인자를 포함합니다.
-        # 이 값들은 실험을 통해 조정해야 하며, 여기서는 예시 값들을 사용합니다.
-        effects.append(["compand", "0.3,0.8", "6", "0.2", "-70,-60,-20", "-5", "-90", "0.2"])
-
-    # 4. 옵션: 추가 왜곡 효과 (overdrive)
-    if random.random() < 0.3:
-        effects.append(["overdrive", "20"])
-
-    # sox_effects로 효과 체인 적용 (효과가 하나라도 있다면)
-    if effects:
-        augmented_waveform, new_sample_rate = sox_effects.apply_effects_tensor(waveform, sample_rate, effects)
-        return augmented_waveform, new_sample_rate
-    else:
-        return waveform, sample_rate
+    # numpy array를 다시 torch.Tensor로 변환 후 (채널 차원 추가) 반환합니다.
+    augmented_waveform = torch.tensor(augmented_np_waveform, dtype=torch.float32).unsqueeze(0)
+    return augmented_waveform, sample_rate
 
 
 def load_dataset_esc50(apply_augmentation=False):
@@ -117,15 +134,8 @@ def load_dataset_esc50(apply_augmentation=False):
     input_values = input_values.remove_columns(remove_columns)
     # 학습의 원할함을 위해 target을 명시적으로 label로 변경
     input_values = input_values.rename_column('target', 'label')
-    print(f'칼럼 삭제: {input_values}')
-
-    # print_dim = np.array(input_values['input_values'])
-    # print(f'input shape: {print_dim.shape}')
-    # print(f'첫번째 차원 데이터: {print_dim[0].ndim}')
-    # print(f'fold 리스트: {folds}')
 
     return input_values, folds
-    # return input_values
 
 
 # load_dataset_esc50()
