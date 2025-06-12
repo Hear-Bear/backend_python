@@ -15,10 +15,6 @@ from audiomentations import (
 from datasets import load_dataset, Audio
 from transformers import AutoFeatureExtractor
 
-# 랜덤 시드 고정
-random.seed(442)
-np.random.seed(442)
-
 # 데이터셋에서 삭제할 (필요 없는)columns
 remove_columns = ['filename', 'esc10', 'audio']
 # Google AudioSet를 pretrained한 모델과 특징 추출기를 불러옴
@@ -38,7 +34,7 @@ def split_by_fold(dataset_split, test_fold=1):
     return train_dataset, val_dataset
 
 
-# 체크포인트가 있다면 "./output" 내의 checkpoint 디렉토리를 자동으로 불러오기
+# 체크포인트가 있다면 "./output_orin" 내의 checkpoint 디렉토리를 자동으로 불러오기
 def get_latest_checkpoint(output_dir):
     if os.path.exists(output_dir):
         checkpoints = [os.path.join(output_dir, d) for d in os.listdir(output_dir) if d.startswith('checkpoint') and os.path.isdir(os.path.join(output_dir, d))]
@@ -68,13 +64,6 @@ def preprocess_function(data, apply_augmentation=False):
 
 
 def get_moderate_augmentation_pipeline(sample_rate):
-    # # RoomSimulator 효과는 IR(Impulse Response) 파일이 필요합니다.
-    # # 실제 환경의 방음 특성을 반영한 IR 파일을 사용하세요.
-    # ir_path = "your_ir_file.wav"  # IR 파일 경로를 지정합니다.
-    #
-    # # Windows 환경에서 RoomSimulator가 동작하지 않을 경우 None으로 처리합니다.
-    # room_simulator = RoomSimulator(ir_path=ir_path, p=0.3) if platform.system() != "Windows" else None
-
     # 여러 효과들을 Compose로 묶어줍니다.
     # 각 트랜스폼은 실제 환경에서 너무 극단적이지 않은 수준으로 적용합니다.
     transforms = [
@@ -86,8 +75,6 @@ def get_moderate_augmentation_pipeline(sample_rate):
         PitchShift(min_semitones=-1, max_semitones=1, p=0.5),
         # 오디오 신호의 시작이나 끝을 약간 이동 (전체 길이의 5~10% 정도)
         Shift(min_shift=-0.1, max_shift=0.1, p=0.5),
-        # 실제 방의 잔향 효과를 반영 (IR 파일이 있다면 자연스러운 리버브 효과 적용)
-        # room_simulator,
         # 볼륨을 약간 조절하여 녹음 조건의 차이를 반영
         Gain(min_gain_db=-2.0, max_gain_db=2.0, p=0.5),
     ]

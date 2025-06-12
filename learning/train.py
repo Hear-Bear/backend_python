@@ -14,7 +14,6 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_name', default="MIT/ast-finetuned-audioset-10-10-0.4593")
     parser.add_argument('--output_dir', default="./output")
-    parser.add_argument('--num_experiments', type=int, default=10)
     parser.add_argument('--csv_path', default="./output/logs_results_augmented_esc50.csv")
     return parser.parse_args()
 
@@ -22,9 +21,6 @@ def parse_args():
 def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
-
-    # Prepare data (augmented)
-    dataset, _ = prepare_datasets(apply_augmentation=True)
 
     # Initialize model and Trainer args
     model = get_model(args.model_name)
@@ -50,7 +46,10 @@ def main():
     results = []
     trainer = None
     # Multiple experiments
-    for i in range(args.num_experiments):
+    for i in range(10):
+        # 매 phase마다 데이터셋을 새로이 초기화
+        dataset, _ = prepare_datasets(apply_augmentation=True)
+
         print(f"=== Experiment {i+1} ===")
         train_ds, eval_ds = split_by_fold(dataset)
         trainer = make_trainer(model, train_ds, eval_ds, training_args)

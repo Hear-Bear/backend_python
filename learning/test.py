@@ -4,7 +4,7 @@ from functions import prepare_datasets, make_trainer, get_model
 
 
 def main():
-    output_dir = "./output/augmented_esc50"
+    output_dir = "output/augmented_esc50"
 
     test_ds, _ = prepare_datasets(apply_augmentation=False)
 
