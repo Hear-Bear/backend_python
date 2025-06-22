@@ -83,9 +83,7 @@ def classify_emotion(text: str, tfidf_threshold: float = 0.75, k: int = 13):
     conf = probs[top_idx]
     if conf >= tfidf_threshold:
         return {'sentiment': label, 'confidence': float(conf)}
-    # SBERT + KNN fallback
-    # tokenizer = AutoTokenizer.from_pretrained('snunlp/KR-SBERT-V40K-klueNLI-augSTS')
-
+    # SBERT + Classifier
     inputs = tokenizer(
         text=text,
         padding='max_length',
