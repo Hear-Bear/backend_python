@@ -1,6 +1,7 @@
 # test.py
 # 학습된 모델로 단일 파일 추론
 
+import config
 import torch
 import librosa
 import torch.nn.functional as F
@@ -11,7 +12,7 @@ def test_single_audio(model_path, audio_file, target_sr, id2label):
     """
     학습된 모델을 로드하여 단일 오디오 파일에 대한 추론을 실행.
     """
-    print(f"\n--- 4. 테스트(추론) 시작: {audio_file} ---")
+    print(f"\n--- 테스트(추론) 시작: {audio_file} ---")
 
     # 사용 가능한 디바이스 확인
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -36,7 +37,7 @@ def test_single_audio(model_path, audio_file, target_sr, id2label):
         return_tensors="pt",
         padding="max_length",
         truncation=True,
-        max_length=1024
+        max_length=config.MAX_AUDIO_LENGTH,
     )
 
     input_values = inputs.input_values.to(device)
@@ -44,15 +45,35 @@ def test_single_audio(model_path, audio_file, target_sr, id2label):
     with torch.no_grad():
         logits = model(input_values).logits
 
-    scores = F.softmax(logits, dim=1).squeeze().cpu().tolist()
-    prediction_idx = torch.argmax(logits, dim=1).item()
-    predicted_label = id2label[prediction_idx]
+    # sigmoid 적용
+    probs = torch.sigmoid(logits).squeeze().cpu().tolist()
 
-    print(f"추론 결과: {predicted_label} (신뢰도: {scores[prediction_idx]:.4f})")
+    print("\n--- 추론 결과 (신뢰도 50% 이상) ---")
+    found = False
+    # 50%가 넘는 모든 클래스 찾기
+    predictions = []
+    for i, prob in enumerate(probs):
+        if prob > 0.7:
+            predictions.append((id2label[i], prob))
+            found = True
 
-    print("--- 클래스별 신뢰도 ---")
-    for i, score in enumerate(scores):
-        print(f"{id2label[i]:<10}: {score:.4f}")
+    if found:
+        # 신뢰도 순으로 정렬하여 출력
+        predictions.sort(key=lambda x: x[1], reverse=True)
+        for label, prob in predictions:
+            print(f"- {label}: {prob:.4f}")
+    else:
+        print("신뢰도 50%를 넘는 클래스를 찾지 못했습니다.")
 
-    print(f"--- 4. 테스트(추론) 완료 ---")
-    return predicted_label, scores
+    print("\n--- 클래스별 신뢰도 (전체) ---")
+    all_scores = [(id2label[i], prob) for i, prob in enumerate(probs)]
+    # 신뢰도 순으로 정렬
+    all_scores.sort(key=lambda x: x[1], reverse=True)
+
+    for label, prob in all_scores:
+        # 너무 낮은 값은 제외하고 상위 10개 정도만 보거나...
+        # 여기서는 일단 다 출력 (필요시 조절)
+        print(f"{label:<25}: {prob:.4f}")
+
+    print(f"\n--- 테스트(추론) 완료 ---")
+    return predictions, probs
