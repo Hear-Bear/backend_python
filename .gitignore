@@ -3,7 +3,7 @@
 *.pt
 *.pth
 *.bin
-C:\dev\python\capstone\new_model\ast-finetuned-fsd50k-custom
-C:\dev\python\capstone\new_model\ast-finetuned-fsd50k-focal-loss
-C:\dev\python\capstone\new_model\ast-finetuned-fsd50k-focal-loss-weighted
-C:\dev\python\capstone\new_model\ast-finetuned-fsd50k-multi-label
+/dev/python/capstone/new_model/ast-finetuned-fsd50k-custom/
+/dev/python/capstone/new_model/ast-finetuned-fsd50k-focal-loss/
+/dev/python/capstone/new_model/ast-finetuned-fsd50k-focal-loss-weighted/
+/dev/python/capstone/new_model/ast-finetuned-fsd50k-multi-label/
