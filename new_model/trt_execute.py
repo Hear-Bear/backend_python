@@ -1,59 +1,56 @@
-import tensorrt as trt
-import numpy as np
-import pycuda.driver as cuda
-import pycuda.autoinit
+# import pycuda.autoinit  # <--- [수정] autoinit은 ROS 환경에서 위험할 수 있어 제거 권장
 import json
 import os
-from transformers import AutoFeatureExtractor
-from pathlib import Path
-import librosa  # 오디오 로드용 (없으면 pip install librosa)
 
+import librosa
+import numpy as np
+import pycuda.driver as cuda
+import tensorrt as trt
+from transformers import AutoFeatureExtractor
+
+# 로거 설정
 TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
 
 # ==========================================
 # 1. 설정 및 상수 정의
 # ==========================================
 
-# 모델 파일이 있는 디렉토리 (HuggingFace 다운로드 경로)
-MODEL_DIR = "./model_download"
+# 모델 경로 (절대 경로로 지정하는 것이 안전함)
+BASE_DIR = os.path.expanduser("~/turtlebot3_ws/backend_python")
+MODEL_DIR = os.path.join(BASE_DIR, "model_download")
 
-# 카테고리별 임계값 (Safety는 민감하게, 나머지는 보수적으로)
+# 카테고리별 임계값 (로봇 환경에 맞게 조정됨)
 CATEGORY_THRESHOLDS = {
-    'Safety': 0.40,  # 비명, 유리창 깨짐 등
-    'Household': 0.65,  # 생활 소음
-    'Human': 0.70,  # 말소리 등
-    'Animal': 0.70,  # 동물 소리
-    'Etc': 0.50  # 기타
+    'Safety': 0.35,  # 위급 상황 (민감하게)
+    'Household': 0.50,  # 생활 소음
+    'Human': 0.55,  # 사람 소리 (로봇 노이즈 고려하여 낮춤)
+    'Animal': 0.55,  # 동물 소리
+    'Etc': 0.50
 }
 
-# 클래스 -> 카테고리 매핑 정보
+# 클래스 -> 카테고리 매핑 (동일)
 CLASS_CATEGORY_MAP = {
     'Alarm': 'Safety', 'Boom': 'Safety', 'Crushing': 'Safety', 'Crying': 'Safety',
     'Fire': 'Safety', 'Glass': 'Safety', 'Gunshot': 'Safety', 'Respiratory': 'Safety',
     'Screaming': 'Safety', 'Siren': 'Safety', 'Vehicle_horn': 'Safety',
-
     'Boiling': 'Household', 'Clock': 'Household', 'Keys': 'Household', 'Dishes': 'Household',
     'Door': 'Household', 'Doorbell': 'Household', 'Frying': 'Household', 'Furniture': 'Household',
     'Hiss': 'Household', 'Knock': 'Household', 'Microwave_oven': 'Household',
     'Telephone': 'Household', 'Toilet': 'Household', 'Typing': 'Household', 'Water': 'Household',
-
     'Clapping': 'Human', 'Footsteps': 'Human', 'Running': 'Human',
     'Sneeze': 'Human', 'Speech': 'Human', 'Laughter': 'Human',
-
     'Bird': 'Animal', 'Cat': 'Animal', 'Dog': 'Animal',
-
     'Tools': 'Etc', 'Thunder': 'Etc'
 }
 
-# 전처리기 로드 (한 번만 로드)
+# 전처리기 로드
 try:
     feature_extractor = AutoFeatureExtractor.from_pretrained(MODEL_DIR)
-except Exception as e:
-    print(f"Warning: 로컬에서 feature_extractor 로드 실패. 인터넷에서 기본 설정을 가져옵니다. ({e})")
+except Exception:
     feature_extractor = AutoFeatureExtractor.from_pretrained("MIT/ast-finetuned-audioset-10-10-0.4593")
 
 
-# id2label 로드 함수
+# id2label 로드
 def load_id2label(model_dir):
     config_path = os.path.join(model_dir, "config.json")
     if os.path.exists(config_path):
@@ -66,42 +63,39 @@ def load_id2label(model_dir):
 ID2LABEL = load_id2label(MODEL_DIR)
 
 
-# ==========================================
-# 2. 헬퍼 함수 (전처리, 후처리)
-# ==========================================
-
 def sigmoid(x):
-    """Multi-label 확률 계산을 위한 Sigmoid"""
     return 1 / (1 + np.exp(-x))
 
 
 def prepare_input(wav_path: str):
-    # Librosa를 사용하여 오디오 로드 (자동 리샘플링)
+    # 오디오 파일을 로드하여 모델 입력 형태(np.float32)로 변환
     try:
+        # sr=None이 아니라 feature_extractor의 sr로 강제 리샘플링
         audio, _ = librosa.load(wav_path, sr=feature_extractor.sampling_rate)
     except Exception as e:
-        print(f"Error loading audio: {e}")
+        print(f"[Error] Audio load failed: {e}")
+        # 실패 시 0으로 채운 더미 데이터 반환 (Shape 주의: 1, 1024, 128)
         return np.zeros((1, 1024, 128), dtype=np.float32)
 
-    # Feature Extractor 적용
+    # 특징 추출
     inputs = feature_extractor(
         audio,
         sampling_rate=feature_extractor.sampling_rate,
         return_tensors="np",
-        padding="max_length",  # 1024 프레임 길이 맞춤
+        padding="max_length",
         max_length=1024,
         truncation=True
     )
 
-    # (Batch, Time, Freq) 형태로 변환 및 타입 캐스팅
+    # Type Casting
+    # AST 모델은 보통 (Batch, Time, Freq) 입력을 받음
     input_values = inputs["input_values"].astype(np.float32)
+
     return input_values
 
 
 def post_process_output(logits):
-    """로짓 -> Sigmoid -> 임계값 적용 -> 최종 결과 반환"""
-    probs = sigmoid(logits).flatten()  # 1차원 배열로 변환
-
+    probs = sigmoid(logits).flatten()
     detected = []
 
     for idx, prob in enumerate(probs):
@@ -116,118 +110,132 @@ def post_process_output(logits):
                 "prob": float(prob)
             })
 
-    # 확률 높은 순 정렬
     detected.sort(key=lambda x: x['prob'], reverse=True)
 
     if not detected:
         return "None", "None"
 
-    # 가장 중요한 이벤트(Safety 우선) 또는 확률 1순위 반환
-    # 여기서는 단순히 확률 1순위를 반환하도록 함.
-    top_event = detected[0]
-    return top_event['label'], top_event['category']
+    # 가장 확률 높은 것 반환
+    top = detected[0]
+    return top['label'], top['category']
 
-
-# ==========================================
-# 3. TensorRT 추론 클래스
-# ==========================================
 
 class TRTInference:
     def __init__(self, engine_path: str):
         if not os.path.exists(engine_path):
             raise FileNotFoundError(f"TRT Engine not found: {engine_path}")
 
+        # CUDA Context 초기화
+        try:
+            cuda.init()
+            self.device = cuda.Device(0)
+            self.cuda_ctx = self.device.make_context()
+        except Exception:
+            # 이미 컨텍스트가 있다면 패스 (ROS 노드에서 생성한 경우)
+            pass
+
         with open(engine_path, 'rb') as f, trt.Runtime(TRT_LOGGER) as runtime:
             self.engine = runtime.deserialize_cuda_engine(f.read())
 
         self.context = self.engine.create_execution_context()
         self.stream = cuda.Stream()
-        self.tensors = [None] * self.engine.num_io_tensors
+
+        # IO 버퍼 할당
+        self.inputs = []
+        self.outputs = []
+        self.allocations = []
+
+        for i in range(self.engine.num_io_tensors):
+            name = self.engine.get_tensor_name(i)
+            is_input = False
+            if self.engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT:
+                is_input = True
+
+            dtype = self.engine.get_tensor_dtype(name)
+            shape = self.engine.get_tensor_shape(name)
+
+            # 동적 배치가 있다면 -1을 1로 가정 (여기선 고정 배치 1 가정)
+            if shape[0] < 0: shape = (1,) + shape[1:]
+
+            size = trt.volume(shape) * dtype.itemsize
+            allocation = cuda.mem_alloc(size)
+            self.allocations.append(int(allocation))
+
+            binding = {
+                'index': i,
+                'name': name,
+                'dtype': np.float32,  # AST 기본
+                'shape': shape,
+                'allocation': allocation,
+            }
+
+            if is_input:
+                self.inputs.append(binding)
+            else:
+                self.outputs.append(binding)
 
     def infer(self, input_array: np.ndarray):
-        # 입력 바인딩 (Index 0)
-        input_idx = 0
-        if self.engine.get_tensor_mode(self.engine[input_idx]) != trt.TensorIOMode.INPUT:
-            # 만약 0번이 입력이 아니라면 이름을 찾아야 함 (일반적으로 0번임)
-            pass
+        # 입력이 하나라고 가정 (AST 모델)
+        cuda.memcpy_htod_async(self.inputs[0]['allocation'], input_array.ravel(), self.stream)
 
-        self.context.set_input_shape(self.engine[input_idx], input_array.shape)
+        # Context에 텐서 주소 설정
+        for i in range(len(self.allocations)):
+            name = self.engine.get_tensor_name(i)
+            self.context.set_tensor_address(name, self.allocations[i])
 
-        # 버퍼 할당 및 주소 매핑
-        for idx in range(self.engine.num_io_tensors):
-            if self.tensors[idx] is None:
-                name = self.engine[idx]
-                shape = self.context.get_tensor_shape(name)
-                size = trt.volume(shape)
-                dtype = trt.nptype(self.engine.get_tensor_dtype(name))
-
-                # GPU 메모리 할당
-                buf = cuda.mem_alloc(size * dtype().nbytes)
-                self.tensors[idx] = buf
-                self.context.set_tensor_address(name, int(buf))
-
-        # Host -> Device 복사
-        cuda.memcpy_htod_async(self.tensors[0], input_array.ravel(), self.stream)
-
-        # 비동기 실행
+        # 실행
         self.context.execute_async_v3(stream_handle=self.stream.handle)
 
-        # Device -> Host 복사 준비
-        output_idx = 1
-        output_name = self.engine[output_idx]
-        output_shape = tuple(self.context.get_tensor_shape(output_name))
-        output_dtype = trt.nptype(self.engine.get_tensor_dtype(output_name))
-
-        host_output = np.empty(output_shape, dtype=output_dtype)
-        cuda.memcpy_dtoh_async(host_output, self.tensors[output_idx], self.stream)
+        # 출력 복사 (Device -> Host)
+        output_binding = self.outputs[0]
+        output = np.empty(output_binding['shape'], dtype=output_binding['dtype'])
+        cuda.memcpy_dtoh_async(output, output_binding['allocation'], self.stream)
 
         # 동기화
         self.stream.synchronize()
-        return host_output
+        return output
+
+    def __del__(self):
+        # 소멸자에서 컨텍스트 해제 (선택 사항)
+        try:
+            self.cuda_ctx.pop()
+        except:
+            pass
 
 
-# ==========================================
-# 4. 실행용 래퍼 함수
-# ==========================================
-
-_runner_cache = None
+# 실행 래퍼 (Singleton)
+_runner_instance = None
 
 
-def _get_runner(model_path: str):
-    global _runner_cache
-    if _runner_cache is None:
-        print(f"Loading TRT Engine from {model_path}...")
-        _runner_cache = TRTInference(model_path)
-    return _runner_cache
+def get_runner():
+    global _runner_instance
+    if _runner_instance is None:
+        model_path = os.path.join(MODEL_DIR, "model.trt")
+        print(f"[TRT] Loading engine from {model_path}...")
+        _runner_instance = TRTInference(model_path)
+    return _runner_instance
 
 
-def classify_noise(wav_path: str,
-                   model_path: str = os.path.join(MODEL_DIR, "model.trt")
-                   ) -> tuple[str, str]:
-    """
-    외부에서 호출하는 메인 함수
-    Return: (Label, Category) 예: ('Glass', 'Safety')
-    """
-    runner = _get_runner(model_path)
+# wav 경로를 받아 (Label, Category) 반환
+def classify_noise(wav_path: str) -> tuple[str, str]:
+    # 파일 존재 여부 확인
+    if not os.path.exists(wav_path):
+        print(f"[Error] File not found: {wav_path}")
+        return "Error", "File_Not_Found"
 
-    # 1. 전처리
+    runner = get_runner()
+
+    # 전처리
     input_tensor = prepare_input(wav_path)
 
-    # 2. 추론
-    logits = runner.infer(input_tensor)
+    # 추론
+    try:
+        logits = runner.infer(input_tensor)
 
-    # 3. 후처리 (Sigmoid + Threshold)
-    label, category = post_process_output(logits)
+        # 후처리
+        label, category = post_process_output(logits)
+        return label, category
 
-    return label, category
-
-
-if __name__ == "__main__":
-    # 테스트 코드
-    test_wav = "/home/nvidia/turtlebot3_ws/recordings/test_audio.wav"  # 테스트할 파일 경로
-
-    if os.path.exists(test_wav):
-        lbl, cat = classify_noise(test_wav)
-        print(f"Detected Result: {lbl} (Category: {cat})")
-    else:
-        print("Test file not found.")
+    except Exception as e:
+        print(f"[Error] Inference failed: {e}")
+        return "Error", "Inference_Failed"
