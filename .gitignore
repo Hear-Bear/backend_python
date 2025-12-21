@@ -3,3 +3,7 @@
 *.pt
 *.pth
 *.bin
+new_model/ast-finetuned-fsd50k-custom/
+new_model/ast-finetuned-fsd50k-focal-loss/
+new_model/ast-finetuned-fsd50k-focal-loss-weighted/
+new_model/ast-finetuned-fsd50k-multi-label/
